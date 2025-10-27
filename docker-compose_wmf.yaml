@@ -1,0 +1,16 @@
+version: "3.5"
+services:
+  wmf-service:
+    image: registry.git.modern-expo.com:8090/andriy.korovin/wmf/main:latest
+    restart: always
+    environment:
+      NATS_URL: "nats://nats:4222"
+      WMF_URL: "ws://192.168.143.31:25000"
+    ports:
+      - 27000:27000
+    networks: ["nats"]
+
+
+networks:
+  nats:
+    name: nats

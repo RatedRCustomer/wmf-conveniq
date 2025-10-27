@@ -1,0 +1,6 @@
+fastapi>=0.68
+pydantic>=1.8
+uvicorn[standard]>=0.15
+nats-py
+websockets
+asyncio
