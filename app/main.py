@@ -31,63 +31,75 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.websocket("/")
-async def websocket_endpoint(websocket: WebSocket):  # Додано nc як аргумент
-    # send2POS = srv.pubMsg()
-    # global send2POS
+async def websocket_endpoint(websocket: WebSocket):
     nc = app.state.nc
     await websocket.accept()
+    subscription = None
+    ws_open = True
+
     async def subscribe_handler(msg):
-        data = msg.data.decode()
-#        print("Data: ", data)
-
-        fromPOS = srv.subMsg(json.loads(data))
-#        print("fromPOS: ", fromPOS.toJson())
-        toWMF = srv.toWMF(fromPOS)
-
-#        print("toWMF: ", toWMF.toJson())
-        await websocket.send_json(toWMF.toJson())
-
-    await nc.subscribe('wmf.sub', cb=subscribe_handler)
-
-    while True:
+        if not ws_open:
+            return
         try:
-            # message = await websocket.receive_text()
+            data = msg.data.decode()
+            fromPOS = srv.subMsg(json.loads(data))
+            toWMF = srv.toWMF(fromPOS)
+            await websocket.send_json(toWMF.toJson())
+        except Exception:
+            pass  # WebSocket closed, ignore
+
+    try:
+        subscription = await nc.subscribe('wmf.sub', cb=subscribe_handler)
+
+        while True:
             message = await websocket.receive_json()
 
             if message["Purchase"]["MessageType"] != 9:
                 purchase = wmf.Purchase(message)
                 print("purchase: ", purchase.toJson())
                 send2POS = srv.fromWMF(purchase)
-                if purchase.MessageType == 2:
-                    await pub_msg(send2POS.toJson());
+                await pub_msg(send2POS.toJson())
 
-                else:
-                    await pub_msg(send2POS.toJson());
-
-
-        except Exception as e:
-            print("Exc: ", e)
+    except Exception as e:
+        print("WebSocket endpoint error: ", e)
+        try:
             await pub_msg(str(e))
-            break
+        except Exception:
+            pass
+    finally:
+        ws_open = False
+        # Unsubscribe to prevent memory leak
+        if subscription:
+            try:
+                await subscription.unsubscribe()
+                print("Unsubscribed from wmf.sub")
+            except Exception as e:
+                print(f"Error unsubscribing from wmf.sub: {e}")
 
 
 async def client_task():
   nc = app.state.nc
   while True:
     print("start Connect")
+    subscription = None
 
-    #url = "ws://localhost:25000"   ## URL WS - server
     try:
         async with websockets.connect(wmfURL) as websocket:
+            # Flag to track if websocket is still open
+            ws_open = True
 
             async def message_handler(msg):
+                if not ws_open:
+                    return
                 subject = msg.subject
-                reply = msg.reply
                 data = msg.data.decode()
                 print(f'Received a message on {subject}: {data}')
-                await websocket.send(data)
+                try:
+                    await websocket.send(data)
+                except websockets.exceptions.ConnectionClosed:
+                    pass  # WebSocket already closed, ignore
 
-            await nc.subscribe("wmf.cmd", cb=message_handler)
+            subscription = await nc.subscribe("wmf.cmd", cb=message_handler)
 
             print("Connect")
             cn = {"Status": "Connected"}
@@ -95,19 +107,29 @@ async def client_task():
             cn = {"function":"startPushErrors"}
             await nc.publish("wmf.cmd", json.dumps(cn).encode())
 
-            while True:
-               data = await websocket.recv()
-               if data is None:
-                     break
-               #print(f"Received from wmf: {data}")
-               await nc.publish("wmf.msg", data.encode())
+            try:
+                while True:
+                   data = await websocket.recv()
+                   if data is None:
+                         break
+                   await nc.publish("wmf.msg", data.encode())
+            finally:
+                ws_open = False
 
-    except Exception as e :
-        #print(f"Connection closed, retrying in 5 seconds...")
-        #print(e)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
         cn = {"Status": "Connection closed, retrying in 5 seconds..."}
         await nc.publish("wmf.msg", json.dumps(cn).encode())
-        await asyncio.sleep(5)  # Wait before retrying
+    finally:
+        # Always unsubscribe to prevent memory leak
+        if subscription:
+            try:
+                await subscription.unsubscribe()
+                print("Unsubscribed from wmf.cmd")
+            except Exception as e:
+                print(f"Error unsubscribing: {e}")
+
+    await asyncio.sleep(5)  # Wait before retrying
 
 
 
